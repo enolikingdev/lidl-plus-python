@@ -70,6 +70,7 @@ class LidlPlusApi:
         if self._login_url:
             return self._login_url
         client = Client(client_authn_method=CLIENT_AUTHN_METHOD, client_id=self._CLIENT_ID)
+        client.request_args["verify"] = False
         client.provider_config(self._AUTH_API)
         code_challenge, self._code_verifier = client.add_code_challenge()
         args = {
@@ -214,11 +215,10 @@ class LidlPlusApi:
         browser = self._get_browser(headless=kwargs.get("headless", True))
         browser.get(self._register_link)
         wait = WebDriverWait(browser, 10)
-        wait.until(expected_conditions.visibility_of_element_located((By.XPATH, '//*[@id="duple-button-block"]/button[1]/span'))).click()
-        #wait.until(expected_conditions.visibility_of_element_located((By.NAME, "EmailOrPhone"))).send_keys(phone)
         wait.until(expected_conditions.element_to_be_clickable((By.NAME, "input-email"))).send_keys(email)
+        self._click(browser, (By.CSS_SELECTOR, '[data-testid="login-or-register-submit-button"]'))
         wait.until(expected_conditions.element_to_be_clickable((By.NAME, "Password"))).send_keys(password)
-        self._click(browser, (By.XPATH, '//*[@id="duple-button-block"]/button'))
+        self._click(browser, (By.CSS_SELECTOR, '[data-testid="button-primary"]'))
         self._check_login_error(browser)
         self._check_2fa_auth(
             browser,
