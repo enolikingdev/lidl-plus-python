@@ -130,8 +130,13 @@ class LidlPlusApi:
             "Authorization": f"Basic {default_secret}",
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        kwargs = {"headers": headers, "data": payload, "timeout": self._TIMEOUT}
+        import os as _os
+        verify = _os.environ.get("CURL_CA_BUNDLE") == ""
+        kwargs = {"headers": headers, "data": payload, "timeout": self._TIMEOUT, "verify": not verify}
         response = requests.post(f"{self._AUTH_API}/connect/token", **kwargs).json()
+        logging.debug("Token response: %s", response)
+        if "expires_in" not in response:
+            raise LoginError(f"Token exchange failed: {response}")
         self._expires = datetime.utcnow() + timedelta(seconds=response["expires_in"])
         self._token = response["access_token"]
         self._refresh_token = response["refresh_token"]
@@ -168,13 +173,20 @@ class LidlPlusApi:
 
     def _parse_code(self, browser, wait, accept_legal_terms=True):
         for request in reversed(browser.requests):
+            # Check the callback URL directly (new flow: browser navigates to app:// URI)
+            if f"{self._APP}://callback" in request.url:
+                if code := re.findall(r"code=([0-9A-Fa-f]+)", request.url):
+                    return code[0]
+            # Check the Location header of /connect responses (old flow)
             if f"{self._AUTH_API}/connect" not in request.url:
+                continue
+            if not request.response:
                 continue
             location = request.response.headers.get("Location", "")
             if "legalTerms" in location:
                 self._accept_legal_terms(browser, wait, accept=accept_legal_terms)
                 return self._parse_code(browser, wait, False)
-            if code := re.findall("code=([0-9A-F]+)", location):
+            if code := re.findall(r"code=([0-9A-Fa-f]+)", location):
                 return code[0]
         return ""
 
@@ -195,17 +207,32 @@ class LidlPlusApi:
 
     def _check_login_error(self, browser):
         response = browser.wait_for_request(f"{self._AUTH_API}/Account/Login.*", 10).response
+        # Cache so _check_2fa_auth can reuse it without a second wait_for_request call
+        self._last_login_response = response
         body = html.unescape(decode(response.body, response.headers.get("Content-Encoding", "identity")).decode())
         if error := re.findall('app-errors="\\{[^:]*?:.(.*?).}', body):
             raise LoginError(error[0])
+        # Detect server-side rate-limiting / overload page
+        if re.search(r"T\xfalterhelt|overload|something went wrong", body, re.IGNORECASE):
+            raise LoginError("Lidl server is overloaded or rate-limiting. Please wait a few minutes and try again.")
 
     def _check_2fa_auth(self, browser, wait, verify_mode="phone", verify_token_func=None):
         if verify_mode not in ["phone", "email"]:
             raise ValueError(f'Unknown 2fa-mode "{verify_mode}" - Only "phone" or "email" supported')
-        response = browser.wait_for_request(f"{self._AUTH_API}/Account/Login.*", 10).response
-        if "/connect/authorize/callback" not in response.headers.get("Location"):
-            element = wait.until(expected_conditions.visibility_of_element_located((By.CLASS_NAME, verify_mode)))
-            element.find_element(By.TAG_NAME, "button").click()
+        # Reuse the cached response from _check_login_error to avoid consuming a second request
+        response = getattr(self, "_last_login_response", None)
+        location = (response.headers.get("Location") or "") if response else ""
+        # New Lidl login page: no Location redirect on success — check the DOM instead
+        if "/connect/authorize/callback" not in location:
+            # If there's a VerificationCode field visible, 2FA is required
+            verify_inputs = browser.find_elements(By.NAME, "VerificationCode")
+            if not verify_inputs:
+                return  # No 2FA needed — login went straight through
+            try:
+                element = wait.until(expected_conditions.visibility_of_element_located((By.CLASS_NAME, verify_mode)))
+                element.find_element(By.TAG_NAME, "button").click()
+            except Exception:
+                pass  # Method selector not present; code input is already shown
             verify_code = verify_token_func()
             browser.find_element(By.NAME, "VerificationCode").send_keys(verify_code)
             self._click(browser, (By.CLASS_NAME, "role_next"))
@@ -226,7 +253,9 @@ class LidlPlusApi:
             kwargs.get("verify_mode", "phone"),
             kwargs.get("verify_token_func"),
         )
-        browser.wait_for_request(f"{self._AUTH_API}/connect.*")
+        # Wait for the authorization code to appear — either as a direct navigation
+        # to the app callback URI, or as a Location header in a /connect response
+        browser.wait_for_request(f"({self._APP}://callback|{self._AUTH_API}/connect/authorize/callback).*", 30)
         code = self._parse_code(browser, wait, accept_legal_terms=kwargs.get("accept_legal_terms", True))
         self._authorization_code(code)
 
