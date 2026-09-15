@@ -42,7 +42,7 @@ class LidlPlusApi:
     _TICKET_API = "https://tickets.lidlplus.com/api/v2"
     _COUPONS_API = "https://coupons.lidlplus.com/api"
     _COUPONS_V1_API = "https://coupons.lidlplus.com/app/api/"
-    _PROFILE_API = "https://profile.lidlplus.com/profile/api"
+    _PROFILE_API = "https://profile.lidlplus.com/api"
     _APP = "com.lidlplus.app"
     _OS = "iOs"
     _TIMEOUT = 10
@@ -243,19 +243,13 @@ class LidlPlusApi:
         browser.get(self._register_link)
         wait = WebDriverWait(browser, 10)
         wait.until(expected_conditions.element_to_be_clickable((By.NAME, "input-email"))).send_keys(email)
-        self._click(browser, (By.CSS_SELECTOR, '[data-testid="login-or-register-submit-button"]'))
-        wait.until(expected_conditions.element_to_be_clickable((By.NAME, "Password"))).send_keys(password)
-        self._click(browser, (By.CSS_SELECTOR, '[data-testid="button-primary"]'))
-        self._check_login_error(browser)
-        self._check_2fa_auth(
-            browser,
-            wait,
-            kwargs.get("verify_mode", "phone"),
-            kwargs.get("verify_token_func"),
-        )
+        # Pause and let the user complete the rest manually in the browser window
+        input("\n>>> Email filled. Please complete the login in the browser window\n"
+              "    (click Tovább, fill password, handle 2FA if needed),\n"
+              "    then press ENTER here to capture the auth code... ")
         # Wait for the authorization code to appear — either as a direct navigation
         # to the app callback URI, or as a Location header in a /connect response
-        browser.wait_for_request(f"({self._APP}://callback|{self._AUTH_API}/connect/authorize/callback).*", 30)
+        browser.wait_for_request(f"({self._APP}://callback|{self._AUTH_API}/connect/authorize/callback).*", 300)
         code = self._parse_code(browser, wait, accept_legal_terms=kwargs.get("accept_legal_terms", True))
         self._authorization_code(code)
 
@@ -272,6 +266,13 @@ class LidlPlusApi:
             "Accept-Language": self._language,
         }
 
+    def _kwargs(self, extra_headers=None):
+        """Common kwargs for all API requests — headers, timeout and SSL verify."""
+        import os as _os
+        verify = not (_os.environ.get("CURL_CA_BUNDLE") == "")
+        headers = {**self._default_headers(), **(extra_headers or {})}
+        return {"headers": headers, "timeout": self._TIMEOUT, "verify": verify}
+
     def tickets(self, only_favorite=False):
         """
         Get a list of all tickets.
@@ -282,7 +283,7 @@ class LidlPlusApi:
         :type onlyFavorite: bool
         """
         url = f"{self._TICKET_API}/{self._country}/tickets"
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
+        kwargs = self._kwargs()
         ticket = requests.get(f"{url}?pageNumber=1&onlyFavorite={only_favorite}", **kwargs).json()
         tickets = ticket["tickets"]
         for i in range(2, int(ticket["totalCount"] / ticket["size"] + 2)):
@@ -291,44 +292,37 @@ class LidlPlusApi:
 
     def ticket(self, ticket_id):
         """Get full data of single ticket by id"""
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
         url = f"{self._TICKET_API}/{self._country}/tickets"
-        return requests.get(f"{url}/{ticket_id}", **kwargs).json()
+        return requests.get(f"{url}/{ticket_id}", **self._kwargs()).json()
 
     def coupon_promotions_v1(self):
         """Get list of all coupons API V1"""
         url = f"{self._COUPONS_V1_API}/v1/promotionslist"
-        kwargs = {"headers": {**self._default_headers(), "Country": self._country}, "timeout": self._TIMEOUT}
-        return requests.get(url, **kwargs).json()
+        return requests.get(url, **self._kwargs({"Country": self._country})).json()
 
     def activate_coupon_promotion_v1(self, promotion_id):
         """Activate single coupon by id API V1"""
         url = f"{self._COUPONS_V1_API}/v1/promotions/{promotion_id}/activation"
-        kwargs = {"headers": {**self._default_headers(), "Country": self._country}, "timeout": self._TIMEOUT}
-        return requests.post(url, **kwargs)
+        return requests.post(url, **self._kwargs({"Country": self._country}))
 
     def coupons(self):
         """Get list of all coupons"""
         url = f"{self._COUPONS_API}/v2/{self._country}"
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
-        return requests.get(url, **kwargs).json()
+        return requests.get(url, **self._kwargs()).json()
 
     def activate_coupon(self, coupon_id):
         """Activate single coupon by id"""
         url = f"{self._COUPONS_API}/v1/{self._country}/{coupon_id}/activation"
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
-        return requests.post(url, **kwargs).json()
+        return requests.post(url, **self._kwargs()).json()
 
     def deactivate_coupon(self, coupon_id):
         """Deactivate single coupon by id"""
         url = f"{self._COUPONS_API}/v1/{self._country}/{coupon_id}/activation"
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
-        return requests.delete(url, **kwargs).json()
+        return requests.delete(url, **self._kwargs()).json()
 
     def loyalty_id(self):
         """Get your loyalty ID"""
         url = f"{self._PROFILE_API}/v1/{self._country}/loyalty"
-        kwargs = {"headers": self._default_headers(), "timeout": self._TIMEOUT}
-        response = requests.get(url, **kwargs)
+        response = requests.get(url, **self._kwargs())
         response.raise_for_status()
         return response.text
